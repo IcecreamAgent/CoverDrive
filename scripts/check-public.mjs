@@ -22,7 +22,12 @@ export function sensitiveFindings(name, text) {
   ];
   for (const [index, line] of text.split('\n').entries()) {
     for (const [category, pattern] of rules) {
-      if (pattern.test(line)) findings.push(`${name}:${index + 1}: ${category}`);
+      // Only the two user-authorized HTTPS demo links may be published in README.
+      // Keep checking other hosts, paths, credentials and source/config files.
+      const inspected = category === 'private-deployment' && name === 'README.md'
+        ? line.replace(/https:\/\/(?:coverdrive|cdbackend)\.icecream\.xin(?=\))/g, 'https://public-demo.invalid')
+        : line;
+      if (pattern.test(inspected)) findings.push(`${name}:${index + 1}: ${category}`);
     }
     // Detect credential-shaped constant assignments without reporting their values.
     if (/\b(?:api_?key|access_?key|app_?key|secret|token)\s*["']?\s*[:=]/i.test(line)) {

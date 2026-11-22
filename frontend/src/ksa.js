@@ -9,6 +9,7 @@
     mute: $("mute-button"), muteLabel: $("mute-label"), micStatus: $("mic-status"), callStatus: $("call-status"), interrupt: $("interrupt-button"),
     recordingBar: $("recording-bar"), recordingTime: $("recording-time"), recordingCaption: $("recording-caption"),
     connection: $("connection-label"), connectionDot: $("connection-dot"), error: $("error-banner"),
+    idleNotice: $("idle-notice"),
     errorText: $("error-text"), counter: $("turn-counter"), authForm: $("auth-form"), token: $("auth-token"),
     modelRoute: $("model-route"), voiceProvider: $("voice-provider"),
     taskList: $("task-list"), taskEmpty: $("task-empty"), taskCount: $("task-count"),
@@ -32,6 +33,8 @@
   let authRequired = false;
   let authToken = "";
   let leaving = false;
+  let idleTimedOut = false;
+  let dialAfterConnect = false;
   let listening = false;
   let microphoneMuted = false;
   let listenerId = null;
@@ -598,6 +601,38 @@
     ui.error.hidden = false;
   }
   function hideError() { ui.error.hidden = true; }
+  function clearIdleWarning() {
+    if (idleTimedOut) return;
+    ui.idleNotice.hidden = true;
+    ui.idleNotice.textContent = "";
+  }
+  function endIdleSession(message) {
+    const returnFocus = document.activeElement === ui.mute;
+    idleTimedOut = true;
+    dialAfterConnect = false;
+    clearTimeout(reconnectTimer);
+    captureGeneration += 1;
+    captureStopping = true;
+    listening = false;
+    userSpeaking = false;
+    listenerId = null;
+    busy = false;
+    clearPendingAssistant();
+    // Retire this socket before stopping playback so late close/audio callbacks
+    // cannot reconnect the idle session or send any more playback acknowledgments.
+    disconnectCurrentSocket();
+    stopPlayback();
+    void closeCapture(false).catch(() => {}).finally(() => {
+      captureStopping = false;
+      updateControls();
+      if (returnFocus) ui.mic.focus({preventScroll:true});
+    });
+    setStage("idle");
+    ui.idleNotice.textContent = `${message || "已连续1分钟未检测到你说话，通话已自动挂断，以避免持续消耗。"} 点击「拨号」可重新开始。`;
+    ui.idleNotice.dataset.state = "ended";
+    ui.idleNotice.hidden = false;
+    setConnection("通话已自动结束", "disconnected");
+  }
   function scrollMessages() { ui.messages.scrollTop = ui.messages.scrollHeight; }
   function setConnection(label, state) {
     ui.connection.textContent = label;
@@ -606,7 +641,7 @@
   }
   function updateControls() {
     ui.send.disabled = !connected || !ui.input.value.trim() || captureStarting || captureStopping;
-    ui.mic.disabled = !connected || captureStarting || captureStopping;
+    ui.mic.disabled = (!connected && !idleTimedOut) || connecting || captureStarting || captureStopping;
     ui.mic.classList.toggle("is-recording", listening);
     ui.mic.setAttribute("aria-pressed", String(listening));
     ui.micLabel.textContent = captureStarting ? "准备麦克风…" : captureStopping ? "挂断中…" : listening ? "挂断" : "拨号";
@@ -1045,6 +1080,8 @@
       };
       capture = current;
       listening = true;
+      idleTimedOut = false;
+      clearIdleWarning();
       outboundOpeningPending = !outboundOpeningSeen;
       if (!send({type:"listen",turn_id:listenerId,playback_barriers:true,outbound:true})) outboundOpeningPending = false;
       recordStarted = Date.now();
@@ -1077,6 +1114,7 @@
     listening = false;
     microphoneMuted = false;
     userSpeaking = false;
+    clearIdleWarning();
     listenerId = null;
     send({type:"unlisten"});
     resumePlayback();
@@ -1117,6 +1155,8 @@
     countTurn();
     ensureAssistant();
     if (send({type:"text",text,turn_id:activeTurnId})) {
+      idleTimedOut = false;
+      clearIdleWarning();
       busy = true;
       setStage("agent");
       ui.input.value = "";
@@ -1134,6 +1174,14 @@
     try { message = JSON.parse(event.data); }
     catch (_) { showError("收到无法解析的服务端消息，请重新连接。"); return; }
     if (!message || typeof message !== "object") return;
+    if (message.type === "idle_warning") {
+      ui.idleNotice.textContent = message.message || "已连续50秒未检测到你说话，10秒后将自动挂断；请说话或发送文字继续。";
+      ui.idleNotice.dataset.state = "warning";
+      ui.idleNotice.hidden = false;
+      return;
+    }
+    if (message.type === "idle_resumed") { clearIdleWarning(); return; }
+    if (message.type === "idle_timeout") { endIdleSession(message.message); return; }
     if (message.type === "execution_event") { receiveExecutionEvent(message.event); return; }
     // Session events must be processed before the current-turn filter. A speech
     // candidate keeps the old route until ASR confirms an actual interruption.
@@ -1231,6 +1279,7 @@
         updateProviderInfo(message);
         ui.authForm.hidden = true;
         setConnection("服务已连接", "connected");
+        if (dialAfterConnect) { dialAfterConnect = false; void startListening(); }
         break;
       case "agent_route": {
         if (!activeTurnId) break;
@@ -1391,6 +1440,10 @@
     current.onclose = (event) => {
       clearTimeout(readyTimeout);
       if (current !== socket) return;
+      if (event.code === 1000 && event.reason === "user_inactive") {
+        endIdleSession();
+        return;
+      }
       const wasListening = listening || captureStarting;
       captureGeneration += 1;
       listening = false;
@@ -1434,7 +1487,14 @@
     }
   });
   $("message-form").addEventListener("submit", (event) => { event.preventDefault(); void submitText(ui.input.value); });
-  ui.mic.addEventListener("click", () => { void (listening ? stopListening() : startListening()); });
+  ui.mic.addEventListener("click", () => {
+    if (idleTimedOut && !connected && !connecting) {
+      dialAfterConnect = true;
+      connect();
+      return;
+    }
+    void (listening ? stopListening() : startListening());
+  });
   ui.mute.addEventListener("click", toggleMicrophone);
   ui.interrupt.addEventListener("click", () => interruptResponse());
   ui.taskAll.addEventListener("click", () => setTaskFilter("all"));
@@ -1496,6 +1556,9 @@
     button.addEventListener("click", () => { void submitText(button.dataset.prompt); });
   });
   $("clear-button").addEventListener("click", () => {
+    idleTimedOut = false;
+    dialAfterConnect = false;
+    clearIdleWarning();
     captureGeneration += 1;
     listening = false;
     userSpeaking = false;

@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     max_recording_seconds: int = Field(default=120, ge=1, le=600)
     max_text_length: int = Field(default=4000, ge=1, le=16000)
     turn_timeout: float = Field(default=180, gt=0)
+    voice_idle_timeout_seconds: float = Field(default=60, gt=0, le=60)
     vad_start_ms: int = Field(default=120, ge=60, le=500)
     vad_min_speech_ms: int = Field(default=180, ge=100, le=1000)
     vad_preroll_ms: int = Field(default=300, ge=120, le=1000)

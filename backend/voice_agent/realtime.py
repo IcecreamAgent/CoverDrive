@@ -1096,6 +1096,8 @@ class RealtimeVoiceSession(VoiceSession):
         if turn is not self.native_turn or turn.canceled or turn.finished:
             return
         turn.question = text or turn.question
+        if kind == "completed" and text.strip():
+            self.note_user_activity()
         await self.send("transcript", text=turn.question, is_final=kind == "completed")
         if kind == "completed" and not turn.ended:
             self.insurance_authorization.observe_final(turn.question)
@@ -1990,7 +1992,7 @@ class RealtimeVoiceSession(VoiceSession):
         self.turn_id = turn.turn_id
         await self.respond_deep(turn)
 
-    async def run(self) -> None:
+    async def _run(self) -> None:
         await self.send_global(
             "ready",
             input_sample_rate=16000,
@@ -2004,6 +2006,8 @@ class RealtimeVoiceSession(VoiceSession):
                 if message["type"] == "websocket.disconnect":
                     break
                 if message.get("bytes") is not None:
+                    if self.listening:
+                        self.observe_user_audio(message["bytes"])
                     await self.handle_audio(message["bytes"])
                     continue
                 raw = message.get("text", "")
@@ -2021,6 +2025,7 @@ class RealtimeVoiceSession(VoiceSession):
                     await self.error("protocol", "turn_id 必须是长度不超过 80 的字符串。")
                     continue
                 if kind == "listen":
+                    self.arm_idle_timeout()
                     self.playback_barriers = event.get("playback_barriers") is True
                     if self.native_task is not None and self.native_task.done():
                         await self.close_native()
@@ -2045,9 +2050,11 @@ class RealtimeVoiceSession(VoiceSession):
                     for task in list(self.background.active_tasks()):
                         await self._cancel_background(task.task_id)
                 elif kind == "text":
+                    text = event.get("text", "")
+                    if isinstance(text, str) and text.strip() and len(text) <= self.settings.max_text_length:
+                        self.note_user_activity()
                     await self.interrupt(notify=False)
                     self.turn_id = turn_id
-                    text = event.get("text", "")
                     if (
                         not isinstance(text, str)
                         or not text.strip()

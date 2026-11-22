@@ -357,6 +357,7 @@ class DuplexInput:
                 await self.session.send_for(item.turn_id, "state", stage="idle")
             return
         await self._announce(item)
+        self.session.note_user_activity()
         await self.session.send_for(item.turn_id, "transcript", text=text, is_final=True)
         if local.kind == "cancel":
             await self.session.cancel_response()

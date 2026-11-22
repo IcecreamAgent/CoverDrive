@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 
@@ -13,6 +14,7 @@ from voice_agent.agent import AgentSession
 from voice_agent.config import Settings
 from voice_agent.duplex import DuplexInput
 from voice_agent.execution_trace import ExecutionTrace
+from voice_agent.endpointing import EndpointDetector
 from voice_agent.providers.asr import ASRClient
 from voice_agent.providers.tts import TTSClient
 from voice_agent.routing import REASON_LABELS, RouteDecision, acknowledgement_for
@@ -52,6 +54,96 @@ class VoiceSession:
         self.duplex = DuplexInput(self)
         self._last_feedback_at: float | None = None
         self.execution_trace = ExecutionTrace(settings)
+        self._idle_detector = EndpointDetector(settings)
+        self._idle_activity = asyncio.Event()
+        self._idle_last_activity: float | None = None
+
+    def arm_idle_timeout(self) -> None:
+        # A page's ready/ping connection is free of supplier sessions. Only an
+        # explicit call/task starts this deadline; repeated listen is no activity.
+        if self._idle_last_activity is None:
+            self.note_user_activity()
+
+    def note_user_activity(self) -> None:
+        self._idle_last_activity = time.monotonic()
+        self._idle_activity.set()
+
+    def observe_user_audio(self, audio: bytes) -> None:
+        if (
+            self._idle_last_activity is None or not audio
+            or len(audio) % 2 or len(audio) > 64000
+        ):
+            return
+        frames = self._idle_detector.feed(audio)
+        # WebRTC speech classification plus the detector's energy gate and
+        # minimum speech duration, never raw packet arrival or RMS alone.
+        if any(frame.voiced and frame.speech_ms >= self.settings.vad_min_speech_ms
+               for frame in frames):
+            self.note_user_activity()
+        if frames and frames[-1].silence_ms >= 400:
+            self._idle_detector.reset()
+
+    async def _idle_notice(self, kind: str, **data) -> None:
+        # A stalled/disconnected browser must not delay supplier cancellation.
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(1):
+                await self.send_global(kind, **data)
+
+    async def _watch_idle(self) -> None:
+        warned = False
+        last = None
+        timeout = self.settings.voice_idle_timeout_seconds
+        warning_at = timeout * 5 / 6
+        while True:
+            self._idle_activity.clear()
+            current = self._idle_last_activity
+            if current is None:
+                await self._idle_activity.wait()
+                continue
+            if current != last:
+                if warned:
+                    await self._idle_notice("idle_resumed")
+                warned, last = False, current
+            elapsed = time.monotonic() - current
+            if elapsed >= timeout:
+                await self._idle_notice(
+                    "idle_timeout", reason="user_inactive",
+                    message=(f"已连续{'1分钟' if timeout == 60 else f'{timeout:g}秒'}未检测到你说话，"
+                             "通话已自动挂断，以避免持续消耗。"),
+                )
+                return
+            if not warned and elapsed >= warning_at:
+                warned = True
+                remaining = max(1, math.ceil(timeout - elapsed))
+                await self._idle_notice(
+                    "idle_warning", remaining_seconds=remaining,
+                    message=f"已连续{warning_at:g}秒未检测到你说话，{remaining}秒后将自动挂断；请说话或发送文字继续。",
+                )
+                continue
+            deadline = timeout if warned else warning_at
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._idle_activity.wait(), max(0, deadline - elapsed))
+
+    async def run(self) -> None:
+        # The independent monitor also covers a blocked provider handshake or
+        # tool operation inside the receive loop, and works without ASR events.
+        runner = asyncio.create_task(self._run())
+        monitor = asyncio.create_task(self._watch_idle())
+        timed_out = False
+        try:
+            done, _ = await asyncio.wait((runner, monitor), return_when=asyncio.FIRST_COMPLETED)
+            if runner in done:
+                await runner
+            else:
+                await monitor
+                timed_out = True
+        finally:
+            await cancel_task(monitor)
+            await cancel_task(runner)
+            if timed_out:
+                with contextlib.suppress(Exception):
+                    async with asyncio.timeout(1):
+                        await self.ws.close(code=1000, reason="user_inactive")
 
     async def _send_message(self, event_type: str, data: dict, *, trace_event=True) -> None:
         # Control messages and their companion traces share the same public
@@ -183,6 +275,7 @@ class VoiceSession:
                 await self.error("asr", "识别内容超过长度限制，请分段提问。")
                 await self.send("state", stage="idle")
             else:
+                self.note_user_activity()
                 self.response_task = asyncio.create_task(self.respond(text.strip()))
         except asyncio.CancelledError:
             raise
@@ -424,7 +517,7 @@ class VoiceSession:
             await self.interrupt()
             await self.error("asr", "音频发送过快或网络阻塞，请重试。")
 
-    async def run(self) -> None:
+    async def _run(self) -> None:
         await self.send(
             "ready", input_sample_rate=16000, output_sample_rate=24000, automatic_endpointing=True
         )
@@ -434,6 +527,8 @@ class VoiceSession:
                 if message["type"] == "websocket.disconnect":
                     break
                 if message.get("bytes") is not None:
+                    if self.duplex.enabled or self.accepting_audio:
+                        self.observe_user_audio(message["bytes"])
                     await self.handle_audio(message["bytes"])
                     continue
                 raw = message.get("text", "")
@@ -453,6 +548,7 @@ class VoiceSession:
                     await self.error("protocol", "turn_id 必须是长度不超过 80 的字符串。")
                     continue
                 if kind == "listen":
+                    self.arm_idle_timeout()
                     await self.duplex.enable()
                 elif kind == "unlisten":
                     await self.duplex.disable()
@@ -460,6 +556,7 @@ class VoiceSession:
                     if turn_id == self.turn_id and isinstance(event.get("playing"), bool):
                         self.duplex.playback_active = event["playing"]
                 elif kind == "start":
+                    self.arm_idle_timeout()
                     if self.duplex.enabled:
                         await self.duplex.disable()
                     await self.start_recording(turn_id)
@@ -474,9 +571,11 @@ class VoiceSession:
                 elif kind == "interrupt":
                     await self.interrupt()
                 elif kind == "text":
+                    text = event.get("text", "")
+                    if isinstance(text, str) and text.strip() and len(text) <= self.settings.max_text_length:
+                        self.note_user_activity()
                     await self.interrupt(notify=False)
                     self.turn_id = turn_id
-                    text = event.get("text", "")
                     if not isinstance(text, str) or not text.strip():
                         await self.error("protocol", "请输入有效文字。")
                     elif len(text) > self.settings.max_text_length:

@@ -82,6 +82,9 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -.4px; }
 .task-jump { color: #d1c6ff; padding: 5px 9px; }
 .composer-area { border-top: 1px solid var(--border); padding: 16px; }
 .composer { display: flex; align-items: center; gap: 10px; }
+.idle-policy { margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.idle-notice { padding: 12px 16px; color: #ffe0aa; background: #3c3025; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.idle-notice[data-state="ended"] { color: #d4d2ee; background: #2c2b43; }
 .call-controls { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .callbtn, .micbtn, .send-button { min-height: 44px; border: 1px solid transparent; border-radius: 10px; padding: 10px 15px; font-size: 13px; white-space: nowrap; }
 .callbtn { background: #7862d5; color: #fff; }

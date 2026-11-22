@@ -6,7 +6,8 @@ const vm = require('node:vm');
 
 // Exercise the migrated production handlers without requesting a real microphone.
 function browser({withTask = true} = {}) {
-  const sent = [], contexts = [], nodes = [], revoked = [], elements = new Map();
+  const sent = [], contexts = [], nodes = [], revoked = [], elements = new Map(), timers = new Map();
+  let timerId = 0;
   const element = () => ({
     value: '', dataset: {}, style: {}, hidden: false, disabled: false, attributes: {}, listeners: {},
     classList: {toggle() {}, add() {}, remove() {}},
@@ -61,21 +62,24 @@ function browser({withTask = true} = {}) {
     WebSocket: Socket, AudioWorkletNode: Worklet,
     URL: {createObjectURL: () => 'blob:capture', revokeObjectURL: url => revoked.push(url)},
     Blob, ArrayBuffer, Uint8Array, Float32Array, DataView,
-    setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {},
+    setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, {callback, delay}); return id; },
+    clearTimeout: id => timers.delete(id), setInterval: () => 1, clearInterval() {},
     testSocket: socket, testAudio: output, withTask,
   });
   const script = fs.readFileSync(path.join(__dirname, '../src/ksa.js'), 'utf8');
   vm.runInContext(script.replace('void initialize();', `
     connected = true; socket = testSocket; outputContext = testAudio; busy = true; playbackActive = true;
     if (withTask) taskRecords.set('background-1', {data: {status: 'running'}});
-    globalThis.api = {startListening, stopListening, toggleMicrophone,
+    globalThis.api = {startListening, stopListening, toggleMicrophone, handleMessage,
       connectForTest: () => { connected = false; socket = null; connect(); },
       currentSocket: () => socket,
+      addPlaybackForTest: source => { audioSources.add(source); playbackActive = true; },
       state: () => ({listening, busy, playbackActive, microphoneMuted, captureStarting, captureStopping, capture,
-        taskStatus: taskRecords.get('background-1')?.data.status})};
+        connected, connecting, idleTimedOut, taskStatus: taskRecords.get('background-1')?.data.status})};
   `), context);
   return {
-    ...context.api, sent, track, contexts, nodes, revoked, get, socket,
+    ...context.api, sent, track, contexts, nodes, revoked, get, socket, timers,
+    event: message => context.api.handleMessage({data: JSON.stringify(message)}),
     useMicrophone: fn => { microphone = fn; },
     useModuleLoader: fn => { loadModule = fn; },
   };
@@ -325,4 +329,138 @@ test('the clear conversation button clears mute and releases capture before the 
   const count = page.sent.length;
   oldAudio({data: {type: 'audio', buffer: new Uint8Array(640).fill(127).buffer}});
   assert.equal(page.sent.length, count);
+});
+
+test('idle warning stays visible during output and clears only when the server confirms user activity', async () => {
+  const page = browser({withTask: false});
+  await page.startListening();
+  const before = page.sent.length;
+  page.event({type: 'idle_warning', turn_id: 'another-turn', message: '10秒后将自动挂断；请说话或发送文字继续。'});
+  assert.equal(page.get('idle-notice').hidden, false);
+  assert.match(page.get('idle-notice').textContent, /10秒后/);
+  assert.equal(page.state().listening, true);
+  assert.equal(page.state().playbackActive, true);
+  assert.equal(page.track.stopped, false);
+  assert.equal(page.sent.length, before, 'a reminder must not generate speech, model work, or control messages');
+  page.event({type: 'idle_resumed'});
+  assert.equal(page.get('idle-notice').hidden, true);
+  await page.stopListening();
+});
+
+test('idle timeout closes capture, queued output and socket without reconnecting or losing its reason', async () => {
+  const page = browser({withTask: false});
+  page.connectForTest();
+  const connection = page.currentSocket();
+  connection.onmessage({data: JSON.stringify({type: 'ready'})});
+  const lateClose = connection.onclose;
+  await page.startListening();
+  page.toggleMicrophone();
+  const lateAudio = page.nodes[0].port.onmessage;
+  const source = {onended() {}, stop() { this.stopped = true; }, disconnect() { this.disconnected = true; }};
+  page.addPlaybackForTest(source);
+  connection.onmessage({data: JSON.stringify({type: 'idle_timeout', turn_id: 'another-turn', message: '已连续1分钟未检测到你说话，通话已自动挂断。'})});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(page.currentSocket(), null);
+  assert.equal(connection.readyState, 3);
+  assert.equal(page.state().connected, false);
+  assert.equal(page.state().listening, false);
+  assert.equal(page.state().busy, false);
+  assert.equal(page.state().playbackActive, false);
+  assert.equal(page.state().capture, null);
+  assert.equal(page.state().captureStopping, false);
+  assert.equal(page.track.stopped, true);
+  assert.equal(page.contexts[0].state, 'closed');
+  assert.equal(page.nodes[0].port.closed, true);
+  assert.equal(source.stopped, true);
+  assert.equal(source.disconnected, true);
+  assert.equal(source.onended, null);
+  assert.equal(page.get('idle-notice').hidden, false);
+  assert.match(page.get('idle-notice').textContent, /自动挂断.*拨号/);
+  assert.equal(page.get('microphone-label').textContent, '拨号');
+  assert.equal(page.get('microphone-button').disabled, false);
+  assert.equal(page.get('mute-button').hidden, true);
+  assert.equal(page.get('call-status').hidden, true);
+  lateClose({code: 1000});
+  page.event({type: 'idle_resumed'});
+  assert.equal(page.timers.size, 0, 'the retired socket must not schedule reconnects');
+  assert.equal(page.get('idle-notice').hidden, false, 'late lifecycle events cannot erase the end reason');
+  const sent = page.sent.length;
+  lateAudio({data: {type: 'audio', buffer: new ArrayBuffer(640)}});
+  assert.equal(page.sent.length, sent);
+});
+
+test('dial after idle timeout starts a fresh connection and clears the reason only once capture restarts', async () => {
+  const page = browser({withTask: false});
+  await page.startListening();
+  page.event({type: 'idle_timeout'});
+  await new Promise(resolve => setImmediate(resolve));
+  const sent = page.sent.length;
+  page.get('microphone-button').listeners.click();
+  assert.equal(page.state().connecting, true);
+  assert.equal(page.state().listening, false);
+  assert.equal(page.get('microphone-button').disabled, true);
+  assert.equal(page.get('idle-notice').hidden, false);
+  assert.equal(page.sent.length, sent);
+  const connection = page.currentSocket();
+  page.useMicrophone(async () => ({getTracks: () => [{enabled: true, stop() {}}]}));
+  connection.onmessage({data: JSON.stringify({type: 'ready'})});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(page.state().connected, true);
+  assert.equal(page.state().listening, true);
+  assert.equal(page.state().microphoneMuted, false);
+  assert.equal(page.state().idleTimedOut, false);
+  assert.equal(page.get('idle-notice').hidden, true);
+  assert.equal(page.sent.filter(event => event.type === 'listen').length, 2);
+  await page.stopListening();
+});
+
+test('an idle close reason ends the session without reconnecting when the timeout message is lost', async () => {
+  const page = browser({withTask: false});
+  page.connectForTest();
+  const connection = page.currentSocket();
+  connection.onmessage({data: JSON.stringify({type: 'ready'})});
+  await page.startListening();
+  connection.onclose({code: 1000, reason: 'user_inactive'});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(page.currentSocket(), null);
+  assert.equal(page.state().idleTimedOut, true);
+  assert.equal(page.state().listening, false);
+  assert.equal(page.state().capture, null);
+  assert.equal(page.state().playbackActive, false);
+  assert.equal(page.track.stopped, true);
+  assert.equal(page.timers.size, 0);
+  assert.equal(page.get('idle-notice').hidden, false);
+  assert.match(page.get('idle-notice').textContent, /1分钟.*自动挂断.*拨号/);
+  assert.equal(page.get('connection-label').textContent, '通话已自动结束');
+  assert.equal(page.get('microphone-button').disabled, false);
+});
+
+test('idle timeout retires a pending permission grant without starting late audio', async () => {
+  const page = browser({withTask: false});
+  let grant;
+  page.useMicrophone(() => new Promise(resolve => { grant = resolve; }));
+  const starting = page.startListening();
+  await Promise.resolve();
+  page.event({type: 'idle_timeout'});
+  grant({getTracks: () => [page.track]});
+  await starting;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(page.track.stopped, true);
+  assert.equal(page.state().capture, null);
+  assert.equal(page.state().listening, false);
+  assert.equal(page.state().captureStarting, false);
+  assert.ok(!page.sent.some(event => event.type === 'listen'));
+  assert.match(page.get('idle-notice').textContent, /自动挂断/);
+  assert.equal(page.get('microphone-button').disabled, false);
+});
+
+test('manually ending input clears a warning and retains the connected session', async () => {
+  const page = browser({withTask: false});
+  await page.startListening();
+  page.event({type: 'idle_warning'});
+  await page.stopListening();
+  assert.equal(page.get('idle-notice').hidden, true);
+  assert.equal(page.state().connected, true);
+  assert.equal(page.state().idleTimedOut, false);
+  assert.equal(page.sent.at(-1).type, 'unlisten');
 });

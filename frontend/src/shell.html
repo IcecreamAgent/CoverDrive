@@ -12,6 +12,7 @@
     <section class="conversation-card chat" aria-label="语音对话">
       <form id="auth-form" class="auth-panel" hidden><label for="auth-token">请输入访问令牌</label><div><input id="auth-token" type="password" autocomplete="off" spellcheck="false" /><button type="submit" class="button">连接</button></div><p>令牌仅保存在当前页面内存中。</p></form>
       <div id="error-banner" class="error-banner" role="alert" hidden><span id="error-text"></span><button id="error-dismiss" aria-label="关闭错误提示" type="button">×</button></div>
+      <div id="idle-notice" class="idle-notice" role="status" aria-live="polite" aria-atomic="true" hidden></div>
       <div id="messages" class="messages" role="log" aria-label="对话记录" aria-live="polite" aria-relevant="additions text">
         <div id="welcome" class="welcome empty"><span class="empty-orb" aria-hidden="true">✦</span><p>点下方「拨号」开始续保沟通，<br />车险坐席会主动开场，您可以随时回应或插话。</p></div>
       </div>
@@ -23,9 +24,10 @@
       </div>
       <footer class="composer-area">
         <form id="message-form" class="composer">
-          <div class="call-controls"><button id="microphone-button" class="callbtn" type="button" disabled aria-pressed="false"><span aria-hidden="true">📞</span> <span id="microphone-label">拨号</span></button><button id="mute-button" class="micbtn" type="button" hidden aria-pressed="false" aria-label="关闭麦克风"><span aria-hidden="true">🎙</span> <span id="mute-label">静音</span></button></div>
+          <div class="call-controls"><button id="microphone-button" class="callbtn" type="button" disabled aria-pressed="false" aria-describedby="idle-policy"><span aria-hidden="true">📞</span> <span id="microphone-label">拨号</span></button><button id="mute-button" class="micbtn" type="button" hidden aria-pressed="false" aria-label="关闭麦克风"><span aria-hidden="true">🎙</span> <span id="mute-label">静音</span></button></div>
           <label class="sr-only" for="message-input">输入消息</label><textarea id="message-input" rows="1" placeholder="输入车险问题，或拨号开始续保沟通…" maxlength="4000"></textarea><button id="send-button" class="send-button send" type="submit" disabled>发送</button>
         </form>
+        <p id="idle-policy" class="idle-policy">连续 60 秒未说话将自动挂断，结束前 10 秒会提醒；发送文字也可继续。</p>
       </footer>
     </section>
             <aside id="inspector-panel" class="inspector-panel" aria-label="调试侧栏" tabindex="-1" hidden>
