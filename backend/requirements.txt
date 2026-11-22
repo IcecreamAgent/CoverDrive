@@ -1,0 +1,23 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+httpx>=0.27
+langchain-openai>=1.0
+aiohttp>=3.10
+numpy>=2.0
+soundfile>=0.12
+protobuf>=5.28
+websockets>=15,<17
+langchain-core>=0.3
+langchain>=1.3.14,<2
+deepagents==0.7.34
+webrtcvad-wheels>=2.0.14,<3
+pytest>=8,<10
+pytest-asyncio>=0.25,<2
+langgraph>=0.2
+pydantic-settings>=2.5
+python-dotenv>=1.0
+onnxruntime>=1.17
+langchain-mcp-adapters>=0.1
+# mcp 1.x 会把 starlette 拉高到 >=0.49，与 fastapi 0.115 的 <0.47 冲突，这里锁住
+starlette>=0.40.0,<0.47.0

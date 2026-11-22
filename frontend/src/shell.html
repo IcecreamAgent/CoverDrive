@@ -1,0 +1,109 @@
+<main class="app-shell">
+  <header class="topbar">
+    <div class="brand"><div class="orb" aria-hidden="true">✦</div><div><h1>Voice Agent</h1><p>车险续保 · 加保销售坐席</p></div></div>
+    <div class="header-status"><span id="call-status" class="call-status" hidden>通话中 <span id="recording-time">00:00</span></span><button class="connection" id="connection-button" type="button" title="重新连接"><span class="status-dot" id="connection-dot" aria-hidden="true"></span><span id="connection-label">正在连接</span></button></div>
+  </header>
+  <section class="page-title hero">
+    <h2>车险续保，边聊边办</h2>
+    <p>主动沟通 · 需求确认 · 实时报价 · 同意后出单</p>
+  </section>
+  <div class="page-actions page-title"><span id="turn-counter" class="muted-caption">0 轮对话</span><div><button id="clear-button" type="button" class="button button-quiet">清空对话</button><button id="inspector-toggle" class="button inspector-toggle" type="button" aria-expanded="false" aria-controls="inspector-panel"><span>查看过程</span><span id="inspector-badge" class="inspector-badge" hidden>0</span></button></div></div>
+  <div id="workspace-grid" class="workspace-grid" data-inspector-open="false">
+    <section class="conversation-card chat" aria-label="语音对话">
+      <form id="auth-form" class="auth-panel" hidden><label for="auth-token">请输入访问令牌</label><div><input id="auth-token" type="password" autocomplete="off" spellcheck="false" /><button type="submit" class="button">连接</button></div><p>令牌仅保存在当前页面内存中。</p></form>
+      <div id="error-banner" class="error-banner" role="alert" hidden><span id="error-text"></span><button id="error-dismiss" aria-label="关闭错误提示" type="button">×</button></div>
+      <div id="messages" class="messages" role="log" aria-label="对话记录" aria-live="polite" aria-relevant="additions text">
+        <div id="welcome" class="welcome empty"><span class="empty-orb" aria-hidden="true">✦</span><p>点下方「拨号」开始续保沟通，<br />车险坐席会主动开场，您可以随时回应或插话。</p></div>
+      </div>
+      <div class="conversation-status">
+        <div class="recording-bar live" id="recording-bar" role="status" hidden><span class="recording-dot pulse" aria-hidden="true"></span><span id="recording-caption">正在聆听…</span></div>
+        <div id="mic-status" class="mic-status" role="status" hidden>麦克风已关闭，助手仍可继续播放</div>
+        <button id="task-jump" class="task-jump" type="button" aria-controls="task-panel" hidden></button>
+        <button id="interrupt-button" class="button interrupt-button" type="button" hidden>停止回答</button>
+      </div>
+      <footer class="composer-area">
+        <form id="message-form" class="composer">
+          <div class="call-controls"><button id="microphone-button" class="callbtn" type="button" disabled aria-pressed="false"><span aria-hidden="true">📞</span> <span id="microphone-label">拨号</span></button><button id="mute-button" class="micbtn" type="button" hidden aria-pressed="false" aria-label="关闭麦克风"><span aria-hidden="true">🎙</span> <span id="mute-label">静音</span></button></div>
+          <label class="sr-only" for="message-input">输入消息</label><textarea id="message-input" rows="1" placeholder="输入车险问题，或拨号开始续保沟通…" maxlength="4000"></textarea><button id="send-button" class="send-button send" type="submit" disabled>发送</button>
+        </form>
+      </footer>
+    </section>
+            <aside id="inspector-panel" class="inspector-panel" aria-label="调试侧栏" tabindex="-1" hidden>
+              <header class="inspector-header">
+                <div><h2>运行详情</h2><p>任务进度、执行记录与系统状态</p></div>
+                <button id="inspector-close" class="inspector-close" type="button" aria-label="收起调试侧栏"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6M20 5v14" /></svg></button>
+              </header>
+              <div id="inspector-tabs" class="inspector-tabs" role="tablist" aria-label="运行详情分类">
+                <button id="inspector-tab-trace" type="button" role="tab" aria-controls="inspector-view-trace" aria-selected="true" tabindex="0">执行过程</button>
+                <button id="inspector-tab-tasks" type="button" role="tab" aria-controls="inspector-view-tasks" aria-selected="false" tabindex="-1">工具执行</button>
+                <button id="inspector-tab-system" type="button" role="tab" aria-controls="inspector-view-system" aria-selected="false" tabindex="-1">系统状态</button>
+              </div>
+          <div id="inspector-body" class="inspector-body">
+                <div id="inspector-view-trace" class="inspector-view" role="tabpanel" aria-labelledby="inspector-tab-trace" tabindex="0">
+                  <section id="trace-panel" class="trace-panel" aria-labelledby="trace-title">
+                    <div class="trace-heading">
+                      <div class="trace-title-group"><span class="section-kicker">EXECUTION TRACE</span><h2 id="trace-title">快慢协作 · 执行追踪</h2><span id="trace-mode" class="trace-mode">等待连接</span></div>
+                      <div class="trace-controls">
+                        <label class="sr-only" for="trace-turn-select">查看执行轮次</label>
+                        <select id="trace-turn-select"><option value="all">全部轮次</option></select>
+                        <button id="trace-copy" type="button">复制调试记录</button>
+                        <button id="trace-toggle" type="button" aria-expanded="true" aria-controls="trace-content">折叠时间线</button>
+                      </div>
+                    </div>
+                    <p class="trace-description">记录真实路由与交接事件；展开关联信息可查看轮次、任务与模型。</p>
+                    <div class="trace-context"><span id="trace-models">模型信息将在连接后显示</span><span id="trace-summary" role="status" aria-live="polite">等待本轮输入</span></div>
+                    <div id="trace-content" class="trace-content">
+                      <div class="trace-lanes" aria-label="协作阶段">
+                        <div id="trace-fast" class="trace-lane" data-status="idle"><span class="trace-lane-label">快模型响应</span><span class="trace-lane-state">等待输入</span></div>
+                        <div id="trace-deep" class="trace-lane" data-status="idle"><span class="trace-lane-label">Deep Agents 执行</span><span class="trace-lane-state">等待委派</span></div>
+                        <div id="trace-voice" class="trace-lane" data-status="idle"><span class="trace-lane-label">语音接续</span><span class="trace-lane-state">等待结果</span></div>
+                      </div>
+                      <p id="trace-metrics" class="trace-metrics">收到执行事件后显示关键耗时。</p>
+                      <p id="trace-empty" class="trace-empty">说一句话或发送文字，即可查看快慢模型的选择、交接与返回过程。</p>
+                      <ol id="trace-list" class="trace-list" aria-label="执行事件时间线"></ol>
+                      <p class="trace-parallel-hint">快模型对话与后台任务可并行；时间线按实际事件顺序记录。</p>
+                    </div>
+                    <p id="trace-notice" class="trace-notice" role="status" aria-live="polite"></p>
+                  </section>
+                </div>
+                <div id="inspector-view-tasks" class="inspector-view" role="tabpanel" aria-labelledby="inspector-tab-tasks" tabindex="0" hidden>
+                  <section id="task-panel" class="task-panel" aria-labelledby="task-panel-title">
+                    <div class="task-panel-heading">
+                      <div><div class="section-kicker">LIVE ACTIVITY</div><h2 id="task-panel-title">任务与接口</h2></div>
+                      <span id="task-count" class="task-count">0</span>
+                    </div>
+                    <p class="task-panel-description">查看客户查询、保费计算与保单办理的真实结果。</p>
+                    <div class="task-toolbar">
+                      <div class="task-filters" role="group" aria-label="筛选任务">
+                        <button id="task-filter-all" type="button" aria-pressed="true">全部</button>
+                        <button id="task-filter-active" type="button" aria-pressed="false">进行中</button>
+                      </div>
+                      <span id="task-summary" class="task-summary" role="status" aria-live="polite">暂无任务</span>
+                    </div>
+                    <div id="task-empty" class="task-empty">
+                      <span class="task-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5H5v14h14V5h-3M9 3h6v4H9V3Zm-1 9h8m-8 4h5" /></svg></span>
+                      <strong id="task-empty-title">等待任务开始</strong>
+                      <p id="task-empty-description">需要查询或执行工具时，<br />真实调用和任务进度会显示在这里。</p>
+                    </div>
+                    <div id="task-list" class="task-list" aria-label="任务执行记录"></div>
+                    <p class="task-panel-footnote">记录保留在当前会话中，清空对话后重置。</p>
+                  </section>
+                </div>
+                <div id="inspector-view-system" class="inspector-view inspector-system" role="tabpanel" aria-labelledby="inspector-tab-system" tabindex="0" hidden>
+                  <div class="model-status"><span id="model-route" class="model-route">等待本轮选择模型</span><span id="voice-provider" class="model-provider" hidden></span></div><section class="pipeline-card"><div class="section-kicker">HOW IT WORKS</div><h2>每句话，都有回应</h2><p class="pipeline-description">听见停顿，也理解你的话是否说完。</p>
+                    <div class="pipeline-step" id="stage-asr" data-active="false"><div class="step-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10v4m4-8v12m5-16v20m5-16v12m4-8v4" /></svg></div><div class="step-content"><div class="step-title">听见 <span>AUDIO</span></div><p>Seeduplex 连续音频理解</p><span class="step-status" id="status-asr">等待语音输入</span></div><span class="step-number">01</span></div>
+                    <div class="pipeline-connector"><span></span><span>音频 → 理解</span></div>
+                    <div class="pipeline-step" id="stage-agent" data-active="false"><div class="step-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.7 6.3L21 12l-6.3 2.7L12 21l-2.7-6.3L3 12l6.3-2.7L12 3Z" /></svg></div><div class="step-content"><div class="step-title">思考 <span>AGENT</span></div><p>LangChain Deepagents</p><span class="step-status" id="status-agent">准备好为你思考</span></div><span class="step-number">02</span></div>
+                    <div class="pipeline-connector"><span></span><span>直接生成语音</span></div>
+                    <div class="pipeline-step" id="stage-tts" data-active="false"><div class="step-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m11 4-6 5H2v6h3l6 5V4Zm5 4a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14" /></svg></div><div class="step-content"><div class="step-title">回应 <span>VOICE</span></div><p>Seeduplex 原生语音输出</p><span class="step-status" id="status-tts">等待生成回应</span></div><span class="step-number">03</span></div>
+                    <div class="pipeline-footer"><span class="tiny-dot" aria-hidden="true"></span> 端到端流式传输</div>
+                  </section>
+                  <section class="info-card"><div class="info-icon" aria-hidden="true">✦</div><h3>续保沟通，一步一步来</h3><p>拨号后由车险坐席主动开场，再确认需求并查询实际报价。您可以随时插话或拒绝；只有明确同意且办理成功后，才会告知出单。</p><div class="audio-spec"><span>语音输出</span><strong>24 kHz <span>·</span> 单声道 PCM</strong></div></section>
+                  <div class="privacy-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Zm-3 9 2 2 4-4" /></svg><span>密钥保留在服务端<br />任务记录仅保留在当前会话</span></div>
+                </div>
+              </div>
+            </aside>
+  </div>
+  <button id="inspector-backdrop" class="inspector-backdrop" type="button" aria-label="关闭调试侧栏" tabindex="-1" hidden></button>
+  <footer class="page-footer"><span>车险销售 · 浏览器麦克风演示</span><span>拨号不接通真实电话网络</span></footer>
+</main>

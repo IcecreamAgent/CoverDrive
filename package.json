@@ -1,0 +1,20 @@
+{
+  "name": "voice-agent-delivery",
+  "private": true,
+  "scripts": {
+    "dev:backend": "node scripts/python-runner.mjs -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --app-dir backend",
+    "dev:frontend": "npm --prefix frontend run dev -- --host 127.0.0.1",
+    "test:backend": "node scripts/python-runner.mjs -m pytest -c backend/pytest.ini backend/tests backend/tests_ksa -q",
+    "test:frontend": "node --test frontend/tests/*.test.cjs && npm run build:frontend",
+    "build:frontend": "npm --prefix frontend run build",
+    "verify:product": "npm run test:backend && npm run test:frontend",
+    "verify": "npm run verify:product && npm run agent:test && npm run agent:validate && npm run check:public",
+    "agent:validate": "node scripts/agent/validate-task.mjs",
+    "agent:candidate": "node scripts/agent/candidate-revision.mjs",
+    "agent:check": "node scripts/agent/run-check.mjs",
+    "agent:evidence": "node scripts/agent/record-evidence.mjs",
+    "agent:ci": "node scripts/agent/ci-verify.mjs",
+    "agent:test": "node --test scripts/agent/task-contract.test.mjs scripts/agent/agent-cli.test.mjs",
+    "check:public": "node --test scripts/check-public.test.mjs && node scripts/check-public.mjs"
+  }
+}
