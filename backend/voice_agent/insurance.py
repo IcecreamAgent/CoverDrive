@@ -292,7 +292,15 @@ class InsuranceAuthorization:
         if result.get("outcome") == "unknown":
             return "暂时无法确认出单结果，请先查询保单记录，避免重复办理。"
         if result.get("outcome") == "not_submitted":
-            return "投保参数未通过校验，本次未提交出单，请修正险种参数后再办理。"
+            reasons = {
+                "writes_disabled": "当前体验环境尚未开放出单，本次未提交订单。",
+                "write_scope": "本次操作不在体验环境开放的办理范围内，本次未提交订单。",
+                "final_input": "缺少本轮有效输入或请求已过期，本次未提交订单，请重新确认要办理的方案。",
+                "selected_customer": "尚未选定并核实本次客户，本次未提交订单，请先核对客户资料。",
+                "customer_identity": "出单客户与当前选定客户资料不一致，本次未提交订单，请先核对资料。",
+            }
+            return reasons.get(result.get("reason"),
+                               "投保参数未通过校验，本次未提交出单，请修正险种参数后再办理。")
         if result.get("outcome") == "failed":
             return "本次出单工具未能完成，没有取得有效保单，请核对后再办理。"
         policy = result.get("policy") or {}
@@ -319,6 +327,18 @@ def guarded_tools(tools, settings, authorization: InsuranceAuthorization, *, exp
 
         def wrap(selected):
             async def invoke(**arguments):
+                def not_submitted(reason):
+                    # These checks run before any external write. Never replace
+                    # an earlier submitted/unknown receipt with a retry permit.
+                    previous = authorization.policy_results.get(version)
+                    if selected.name in POLICY_TOOLS and (
+                        previous is None or previous.get("outcome") == "not_submitted"
+                    ):
+                        authorization.policy_results[version] = {
+                            "outcome": "not_submitted", "reason": reason,
+                        }
+                        authorization.policy_results = dict(list(authorization.policy_results.items())[-20:])
+
                 # The MCP description accepts names, but its published schema
                 # requires objects. Preserve coverage and limits exactly.
                 if selected.name in {"calc_premium", "create_policy"} and isinstance(arguments.get("coverage_items"), list):
@@ -328,9 +348,18 @@ def guarded_tools(tools, settings, authorization: InsuranceAuthorization, *, exp
                     authorization.policy_attempts = set(sorted(authorization.policy_attempts)[-20:])
                 if selected.name in WRITE_TOOLS:
                     if not settings.insurance_writes_enabled:
+                        not_submitted("writes_disabled")
                         raise ToolException("业务写入未授权，本次未执行。")
+                    scope = getattr(settings, "insurance_write_scope", "all")
+                    if scope == "selected_customer_issue" and selected.name != "create_policy":
+                        not_submitted("write_scope")
+                        raise ToolException("体验环境仅开放已选客户的出单，本次操作不受支持，未执行。")
                     if not version or not authorization.final_text.strip() or authorization.version != version:
+                        not_submitted("final_input")
                         raise ToolException("缺少当前轮最终输入或任务版本已过期，本次未执行。")
+                    if scope == "selected_customer_issue" and not authorization.selected_customer:
+                        not_submitted("selected_customer")
+                        raise ToolException("尚未选定并核实本次客户，本次未执行，请先核对客户资料。")
                 if selected.name == "mark_customer_contacted":
                     customer = authorization.selected_customer
                     if customer is not None and arguments.get("customer_id") != customer.get("id"):
@@ -348,6 +377,8 @@ def guarded_tools(tools, settings, authorization: InsuranceAuthorization, *, exp
                         fields = {"customer_name": "姓名", "customer_phone": "电话", "plate": "车牌号"}
                         if any(not customer.get(source) or arguments.get(key) != customer[source]
                                for key, source in fields.items()):
+                            if getattr(settings, "insurance_write_scope", "all") == "selected_customer_issue":
+                                not_submitted("customer_identity")
                             raise ToolException("出单客户与当前选定客户不一致，本次未执行，请核对资料。")
                     previous = authorization.policy_results.get(version)
                     if previous is not None and previous.get("outcome") != "not_submitted":

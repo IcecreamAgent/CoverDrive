@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     insurance_opening_timeout: float = Field(default=8.0, gt=0, le=30)
     insurance_tools_enabled: bool = True
     insurance_writes_enabled: bool = False
+    insurance_write_scope: Literal["all", "selected_customer_issue"] = "all"
     seeduplex_url: str = ""
     seeduplex_model: str = Field(default="", repr=False)
     seeduplex_api_key: str = Field(default="", repr=False)

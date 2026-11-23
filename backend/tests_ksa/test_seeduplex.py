@@ -210,6 +210,70 @@ async def test_prepared_task_speech_uses_native_pcm_without_fake_tool_ids(monkey
     assert socket.closed
 
 
+async def test_conversation_and_prepared_result_share_voice_parameters_and_service_style(monkeypatch):
+    class SpeechSocket(FakeSocket):
+        async def send(self, data):
+            await super().send(data)
+            if json.loads(data)["type"] == "speech_text_buffer.commit":
+                self.push({"type": "response.output_audio.started", "response_id": "result"})
+                self.push({"type": "response.output_audio.delta", "delta": "AQACAA=="})
+                self.push({"type": "response.output_audio.done", "response_id": "result"})
+
+    conversation, result = FakeSocket(), SpeechSocket()
+    sockets = iter([conversation, result])
+    monkeypatch.setattr(seeduplex, "connect", lambda *_args, **_kwargs: next(sockets))
+    configured = settings()
+    configured.tts_speaker = "unrelated-standalone-tts-voice"
+    configured.tts_loudness_rate = 100
+    client = seeduplex.SeeduplexClient(configured)
+    async with client.stream(instructions="先确认身份，再了解续保需求。"):
+        pass
+    prepared = "按已确认方案，合计4254.49元。"
+    assert [pcm async for pcm in client.speech(prepared)] == [b"\x01\x00\x02\x00"]
+
+    native_request, result_request = [socket.sent[0]["session"] for socket in (conversation, result)]
+    assert native_request["model"] == result_request["model"]
+    assert native_request["audio"] == result_request["audio"]
+    assert result_request["audio"]["output"] == {
+        "format": {"type": "pcm_s16le", "rate": 24000},
+        "voice": configured.seeduplex_speaker, "speed": 0, "loudness": 0,
+    }
+    for request in (native_request, result_request):
+        assert request["instructions"].startswith(seeduplex.VOICE_STYLE_INSTRUCTIONS + "\n\n")
+        assert request["instructions"].count(seeduplex.VOICE_STYLE_INSTRUCTIONS) == 1
+    assert "先确认身份" in native_request["instructions"]
+    assert "不改写" in result_request["instructions"] and "新的业务内容" in result_request["instructions"]
+    assert native_request["tools"] == [seeduplex.DEEP_AGENT_TOOL]
+    assert result_request["tools"] == []
+    assert [event["text"] for event in result.sent if event["type"] == "speech_text_buffer.commit"] == [prepared]
+    assert all(socket.closed and socket.sent[-1]["type"] == "session.close"
+               for socket in (conversation, result))
+
+
+@pytest.mark.parametrize("failure", ["provider_error", "empty_audio", "timeout"])
+async def test_prepared_result_failure_keeps_style_and_closes_its_connection(monkeypatch, failure):
+    class FailedSpeechSocket(FakeSocket):
+        async def send(self, data):
+            await super().send(data)
+            if json.loads(data)["type"] != "speech_text_buffer.commit":
+                return
+            if failure == "provider_error":
+                self.push({"type": "error", "error": {"code": "failed", "message": "private-body"}})
+            elif failure == "empty_audio":
+                self.push({"type": "response.output_audio.started", "response_id": "empty"})
+                self.push({"type": "response.output_audio.done", "response_id": "empty"})
+
+    socket = FailedSpeechSocket()
+    patch_connect(monkeypatch, socket)
+    expected = {"provider_error": seeduplex.SeeduplexProviderError,
+                "empty_audio": seeduplex.SeeduplexProtocolError, "timeout": TimeoutError}[failure]
+    with pytest.raises(expected) as caught:
+        _ = [pcm async for pcm in seeduplex.SeeduplexClient(settings(seeduplex_timeout=0.01)).speech("准确播报结果。")]
+    assert "private-body" not in str(caught.value)
+    assert socket.sent[0]["session"]["instructions"].startswith(seeduplex.VOICE_STYLE_INSTRUCTIONS)
+    assert socket.closed and socket.sent[-1]["type"] == "session.close"
+
+
 async def test_prepared_speech_cancellation_releases_the_native_connection(monkeypatch):
     entered = asyncio.Event()
 
@@ -227,6 +291,7 @@ async def test_prepared_speech_cancellation_releases_the_native_connection(monke
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert socket.sent[0]["session"]["instructions"].startswith(seeduplex.VOICE_STYLE_INSTRUCTIONS)
     assert socket.closed
     assert socket.sent[-1]["type"] == "session.close"
 
@@ -263,7 +328,9 @@ async def test_supervision_updates_instructions_without_changing_voice_or_tools(
         await stream.update_instructions("原提示")
     original, first, second = socket.sent[:3]
     assert first["type"] == second["type"] == "session.update"
-    assert first["session"]["instructions"] == "当前任务需要工具，结果由你讲解。"
+    assert first["session"]["instructions"] == (
+        seeduplex.VOICE_STYLE_INSTRUCTIONS + "\n\n当前任务需要工具，结果由你讲解。"
+    )
     assert second["session"] == original["session"]
     for key in ("model", "audio", "tools"):
         assert first["session"][key] == original["session"][key]
@@ -464,6 +531,7 @@ async def test_unconfigured_native_model_fails_before_opening_provider(monkeypat
     with pytest.raises(ValueError, match="SEEDUPLEX_MODEL"):
         async with seeduplex.SeeduplexClient(settings(seeduplex_model="")).stream(instructions="test"):
             pass
+
 
 
 def test_legacy_auth_never_supplies_an_implicit_app_key():
