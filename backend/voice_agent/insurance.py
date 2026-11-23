@@ -32,6 +32,18 @@ Markdown或模型分工，不反复说“好的”。自我介绍称保险公司
 关键车辆类别、座位数或承保条件缺失时先问清，不能默认家用车、5座或任何车辆参数。
 3. 根据客户需求使用 list_insurance_products 确认产品，使用 calc_premium 计算实际报价；
 讲清工具返回的险种、保额、保费和适用条件，不能把上年保费当成今年报价。
+客户要求“按去年”“沿用上年方案”续保时，先调用 get_renewal_profile 读取当前客户的完整历史保障；
+本连接已取得同一客户的完整该工具结果时可直接复用。不要只凭名单中的险种字符串断言没有保额，
+也不要在查询前让客户回忆三者或车上人员保额。工具返回 historical_policy.coverage_items 时，
+沿用其中实际 code、amount 和 unit，完整明细已有的保额不重复询问；
+quote_inputs 是该工具提供的本次核价输入，按其实际字段调用 calc_premium，不使用工具隐含默认补未知车况或出险条件。
+third_party 的 amount 单位为万元，occupant 为万元/座，新车购置价单位元；
+例如实际明细 amount=200、unit=万元，就传200，不改成2000000，也不擅自改档。
+历史车损保额只是历史资料，本次车损核价依据由实际报价工具决定，不能用历史金额冒充新报价。
+若历史明细、必要保额或 quote_inputs 确实缺失或与当前客户冲突，只询问缺失项；
+产品目录的默认保额不是去年保额，不能猜默认方案、用推荐替换上年方案或据险种名称编造保额。
+报价的险种代码或单位错误应依据实际资料在内部修正后重新核价；不要把schema、code、英文参数或工具校验原文读给客户，
+也不要让客户替你修正接口参数或重述已有保额。真正缺失时只自然询问缺失的业务资料；服务不可用时说尚未取得有效报价，可稍后重试，不能编造价格。
 客户询问去年/上年实际交了多少钱、原险种或历史资料时，优先读取本连接已取得的客户工具资料；
 资料缺失可调用 get_renewal_profile 获取该客户的可用资料，只读查询后回答；未返回所问历史字段就如实说明无法查询。回答历史部分不得使用 calc_premium，
 也禁止用当前车辆条件重新试算后冒充历史记录；回答必须明确说是上年度历史保费，不是今年报价。
@@ -147,6 +159,69 @@ def _coverage_items(items, aliases):
         else:
             normalized.append(item)
     return normalized
+
+
+_QUOTE_FAILED = "业务工具未能完成，本次没有有效结果。"
+_QUOTE_SCHEMA_GUIDANCE = (
+    "报价参数未通过校验，本次没有有效报价。请按calc_premium的schema修正参数，"
+    "coverage_items每项须为字典，使用实际工具返回的code与保额；"
+    "先读取get_renewal_profile的历史明细和quote_inputs，缺失项请向客户确认，不补默认。"
+)
+
+
+def _quote_error_texts(value, depth=0):
+    """Read bounded error envelopes; never interpolate their text into guidance."""
+    from langchain_core.messages import ToolMessage
+    if depth > 8:
+        return []
+    if isinstance(value, ToolMessage):
+        artifact = value.artifact
+        structured = (artifact.get("structured_content") if isinstance(artifact, dict)
+                      else getattr(artifact, "structured_content", None))
+        return (_quote_error_texts(value.content, depth + 1)
+                + _quote_error_texts(structured, depth + 1))
+    if isinstance(value, str):
+        if len(value) > 12000:
+            return []
+        try:
+            return _quote_error_texts(json.loads(value), depth + 1)
+        except (ValueError, RecursionError):
+            return [value]
+    if isinstance(value, list):
+        return [text for item in value[:40] for text in _quote_error_texts(item, depth + 1)]
+    if isinstance(value, dict):
+        return [text for key in ("error", "message", "detail", "text", "content")
+                if key in value for text in _quote_error_texts(value[key], depth + 1)]
+    return []
+
+
+def _quote_parameter_guidance(error):
+    """Map audited read-only quote rejections to finite, non-sensitive guidance.
+
+    These messages come from policy._normalize_items/_resolve_factors or MCP
+    argument validation. No arbitrary exception detail is returned to a model.
+    This classifier never permits a policy/write retry.
+    """
+    for text in _quote_error_texts(error):
+        text = text.removeprefix("Error executing tool calc_premium: ")
+        if re.match(r"\A\d+ validation errors? for calc_premiumArguments(?:\n|$)", text):
+            return _QUOTE_SCHEMA_GUIDANCE
+        if text.startswith(("未知险种：", "无法识别的险种条目：", "险种条目缺少险种名称/code：",
+                            "coverage_items 不能为空：")):
+            return ("报价险种参数未通过校验，本次没有有效报价。请先查list_insurance_products，"
+                    "使用实际目录或historical_policy.coverage_items返回的code；每项传字典并保留已确认保额，不猜险种。")
+        if re.fullmatch(r"第三者责任险保额仅支持 \[30, 50, 100, 150, 200, 300, 500\]（万元），当前 [-+\d.eE]+", text):
+            return ("报价的三者险保额参数未通过校验，本次没有有效报价。third_party的amount单位是万元；"
+                    "按实际历史明细或客户确认保额和工具目录修正单位，不擅自改档。")
+        if re.fullmatch(r"车上人员责任险保额仅支持 \[1, 2, 5, 10\]（万元/座），当前 [-+\d.eE]+", text):
+            return ("报价的车上人员保额参数未通过校验，本次没有有效报价。occupant的amount单位是万元/座；"
+                    "按实际历史明细或客户确认保额和工具目录修正单位，不擅自改档。")
+        if text == "新增设备损失险需提供正数保额（元）":
+            return ("报价的新增设备保额未通过校验，本次没有有效报价。added_device须提供实际确认的正数设备价值，单位元；缺失时询问客户。")
+        if text.startswith(("未知车型类别：", "未知 NCD 出险情况：", "未知交强险出险情况：")):
+            return ("报价的车辆类别或出险参数未通过校验，本次没有有效报价。请读取get_renewal_profile的quote_inputs，"
+                    "并按calc_premium工具说明的枚举修正；没有实际资料时询问缺失项，不猜车型、座位数或出险条件。")
+    return None
 
 
 def customer_fact_context(facts: list) -> str:
@@ -287,11 +362,21 @@ def guarded_tools(tools, settings, authorization: InsuranceAuthorization, *, exp
                 tool_input = ({"type": "tool_call", "id": uuid4().hex,
                                "name": selected.name, "args": arguments}
                               if selected.response_format == "content_and_artifact" else arguments)
-                result = await selected.ainvoke(tool_input, config={"callbacks": []})
+                try:
+                    result = await selected.ainvoke(tool_input, config={"callbacks": []})
+                except Exception as error:
+                    if selected.name != "calc_premium":
+                        raise
+                    # Cancellation is a BaseException and must propagate. A
+                    # quote transport/unknown failure has no usable result.
+                    guidance = (_quote_parameter_guidance(str(error))
+                                if isinstance(error, (ValueError, ToolException)) else None)
+                    raise ToolException(guidance or _QUOTE_FAILED) from None
                 from langchain_core.messages import ToolMessage
                 value = result.content if isinstance(result, ToolMessage) else result
                 if ((isinstance(result, ToolMessage) and result.status == "error")
-                    or _business_error(value)):
+                    or _business_error(value)
+                    or (selected.name == "calc_premium" and _business_error(_policy_payload(result)))):
                     if selected.name in POLICY_TOOLS:
                         if _argument_rejection(result, selected.name):
                             authorization.policy_results[version] = {"outcome": "not_submitted"}
@@ -300,6 +385,8 @@ def guarded_tools(tools, settings, authorization: InsuranceAuthorization, *, exp
                                 "coverage_items每项须为字典，险种code以list_insurance_products为准，然后重新调用。"
                             )
                         authorization.policy_results[version] = {"outcome": "failed"}
+                    if selected.name == "calc_premium":
+                        raise ToolException(_quote_parameter_guidance(result) or _QUOTE_FAILED)
                     raise ToolException("业务工具未能完成，本次没有有效结果。")
                 if selected.name in POLICY_TOOLS:
                     payload = _policy_payload(result)
@@ -348,6 +435,7 @@ def guarded_tools(tools, settings, authorization: InsuranceAuthorization, *, exp
                 ),
                 args_schema=selected.args_schema,
                 handle_tool_error=True,
+                handle_validation_error=_QUOTE_SCHEMA_GUIDANCE if selected.name == "calc_premium" else False,
             )
 
         wrapped.append(wrap(original))
