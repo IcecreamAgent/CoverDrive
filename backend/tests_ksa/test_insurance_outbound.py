@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import ToolMessage
 
-from test_realtime import native as native, utterance
+from test_realtime import audio_start, native as native, output, utterance
 import voice_agent.realtime as realtime
 from voice_agent import outbound
 
@@ -17,7 +17,7 @@ CUSTOMER = {
     "车辆类别": "家用轿车", "座位数": 5,
 }
 OTHER_CUSTOMER = {"id": 102, "姓名": "不应选择的客户乙", "车型": "另一车型"}
-GREETING = "隔离客户甲您好，我是保险公司的车险服务专员，想和您确认一下续保安排，现在方便聊两句吗？"
+GREETING = "您好，请问是隔离客户甲吗？"
 FACT = {"tool": "get_expiring_customers", "arguments": "{}", "result": json.dumps({"客户": [CUSTOMER], "数量": 1}, ensure_ascii=False)}
 
 
@@ -63,10 +63,10 @@ async def test_opening_uses_one_real_selected_customer_and_only_the_readonly_too
     assert calls == [("get_expiring_customers", {
         "days": 30, "only_uncontacted": True, "random_pick": False, "limit": 1,
     })]
-    assert greeting.startswith(f'{CUSTOMER["姓名"]}，您好，')
+    assert greeting == f'您好，请问是{CUSTOMER["姓名"]}吗？'
     assert greeting.count(CUSTOMER["姓名"]) == 1
     assert facts["customer_salutation"] == "您"
-    assert "车险" in greeting and "续保" in greeting
+    assert "车险" not in greeting and "续保" not in greeting and "方便" not in greeting
     assert OTHER_CUSTOMER["姓名"] not in greeting
     encoded_facts = json.dumps(facts, ensure_ascii=False)
     assert CUSTOMER["姓名"] in encoded_facts
@@ -75,7 +75,224 @@ async def test_opening_uses_one_real_selected_customer_and_only_the_readonly_too
     assert facts["customer_name"] == CUSTOMER["姓名"]
     context = outbound.native_opening_context(facts["customer_name"], greeting)
     assert CUSTOMER["姓名"] in context and greeting in context
-    assert "不得再次自我介绍" in context and "不得从姓名猜测" in context
+    assert '"sales_stage": "awaiting_identity_reply"' in context
+    assert "尚未自我介绍或询问是否方便" in context and "不得从姓名猜测" in context
+
+
+@pytest.mark.parametrize("context_kind", ["opening", "native", "deep"])
+def test_prompt_contract_keeps_identity_availability_and_consent_separate(context_kind):
+    """Inspect supplied instructions, not a scripted model's claimed understanding."""
+    from voice_agent.insurance import SYSTEM_PROMPT
+
+    context = {
+        "opening": outbound.native_opening_context(CUSTOMER["姓名"], GREETING),
+        "native": realtime.INSTRUCTIONS,
+        "deep": SYSTEM_PROMPT,
+    }[context_kind]
+    assert "客户确认本人后才说“您好，我是保险公司的车险服务专员，想跟您聊一下车险续保的事，现在方便吗？”" in context
+    assert "然后等待回应" in context
+    assert "之后客户确认方便才了解续保需求" in context
+    assert "确认本人不等于确认方便，更不等于同意投保或任何业务写入" in context
+    assert "客户否认身份时简短道歉并结束沟通，不换客推销，不透露车辆、保费等客户资料" in context
+    assert "含糊回应或反问不算身份确认" in context
+    assert "明确拒绝时停止推销" in context
+    assert "不是永久阶段" in context and "实际对话和公开历史为准" in context
+    assert "已经喊出姓名并完成自我介绍" not in context
+    assert "awaiting_availability_reply" not in context
+
+
+@pytest.mark.parametrize("playback_active", [False, True])
+@pytest.mark.parametrize("reply", ["是的", "嗯", "不是本人", "你是哪位", "不需要，别再联系"])
+async def test_final_identity_reply_reaches_native_turn_without_reselecting_or_business_write(native, monkeypatch, reply, playback_active):
+    """Protocol evidence only: the provider, not this fixture, chooses the next response."""
+    socket, instance, _, state = native
+    calls = business_catalog(monkeypatch, {"客户": [CUSTOMER]})
+    await instance.start_outbound()
+    await asyncio.wait_for(instance.response_task, 2)
+    opening = instance.native_turn
+    instance._update_playback(opening.turn_id, playback_active)
+    socket.drain()
+
+    turn = await utterance(instance, item="identity-reply", text=reply)
+
+    assert turn.question == reply
+    assert instance.insurance_authorization.final_text == reply
+    assert instance.insurance_authorization.version == 1
+    assert instance.insurance_authorization.selected_customer == CUSTOMER
+    assert state.speech == [GREETING] and state.calls == []
+    assert [name for name, _ in calls] == ["get_expiring_customers"]
+    events = socket.drain()
+    assert any(isinstance(event, dict) and event.get("type") == "transcript"
+               and event.get("text") == reply and event.get("is_final") for event in events)
+    assert not any(isinstance(event, dict) and event.get("type") == "barge_in_rejected"
+                   and event.get("reason") == "backchannel" for event in events)
+    # Provider output with this input's question identity remains routable.
+    # This sentinel proves protocol mapping, not real model comprehension.
+    await instance.handle_native_event({"type": "response.output_text.delta",
+                                       "question_id": "identity-reply", "response_id": "identity-response",
+                                       "delta": "provider-output-sentinel"})
+    assert instance.native_turn.answer == "provider-output-sentinel"
+    assert not instance.turns["identity-reply"].canceled
+
+
+async def test_opening_partial_ack_waits_for_final_input_without_canceling_its_upstream_response(native, monkeypatch):
+    socket, instance, _, state = native
+    business_catalog(monkeypatch, {"客户": [CUSTOMER]})
+    await instance.start_outbound()
+    await asyncio.wait_for(instance.response_task, 2)
+    opening = instance.native_turn
+    instance._update_playback(opening.turn_id, True)
+    socket.drain()
+    await instance.handle_native_event({"type": "conversation.item.input_audio_transcription.started",
+                                       "item_id": "identity-reply"})
+    await instance.handle_native_event({"type": "conversation.item.input_audio_transcription.delta",
+                                       "item_id": "identity-reply", "delta": "是的"})
+    assert instance.native_turn is opening and instance.candidate
+    assert instance.insurance_authorization.version == 0
+    assert not any(isinstance(event, dict) and event.get("type") == "transcript" for event in socket.drain())
+
+    await instance.handle_native_event({"type": "conversation.item.input_audio_transcription.completed",
+                                       "item_id": "identity-reply", "text": "是的"})
+
+    assert instance.native_turn is not opening
+    assert instance.insurance_authorization.final_text == "是的"
+    assert instance.insurance_authorization.version == 1
+    assert state.cancels == 0, "final ASR already owns the provider's new response"
+    assert any(isinstance(event, dict) and event.get("type") == "transcript"
+               and event.get("text") == "是的" and event.get("is_final") for event in socket.drain())
+
+
+@pytest.mark.parametrize("canceled", [False, True])
+@pytest.mark.parametrize("candidate_id", ["", "fresh-reply"])
+async def test_opening_reply_never_revives_retained_late_input_mapping(native, monkeypatch, canceled, candidate_id):
+    socket, instance, _, state = native
+    business_catalog(monkeypatch, {"客户": [CUSTOMER]})
+    await instance.start_outbound()
+    await asyncio.wait_for(instance.response_task, 2)
+    opening = instance.native_turn
+    retained = realtime.NativeTurn(canceled=canceled)
+    retained.retired.set()
+    instance.turns["retired-item"] = retained
+    instance._update_playback(opening.turn_id, True)
+    socket.drain()
+    await instance.handle_native_event({"type": "conversation.item.input_audio_transcription.started",
+                                       "item_id": candidate_id})
+    await instance.handle_native_event({"type": "conversation.item.input_audio_transcription.completed",
+                                       "item_id": "retired-item", "text": "是的"})
+
+    assert instance.native_turn is opening and not opening.canceled
+    assert instance.turns["retired-item"] is retained
+    assert instance.insurance_authorization.version == 0
+    assert not any(isinstance(event, dict) and event.get("type") == "transcript" for event in socket.drain())
+    assert state.cancels == 0
+    # The unrelated late packet does not poison the current candidate's input.
+    await instance.handle_native_event({"type": "conversation.item.input_audio_transcription.completed",
+                                       "item_id": "fresh-reply", "text": "是的"})
+    assert instance.native_turn.question == "是的"
+    assert instance.insurance_authorization.version == 1
+    assert instance.turns["retired-item"] is retained
+
+
+@pytest.mark.parametrize("action", ["interrupt", "reconnect"])
+async def test_canceled_or_reconnected_opening_has_no_fast_reply_exemption(native, monkeypatch, action):
+    socket, instance, _, state = native
+    business_catalog(monkeypatch, {"客户": [CUSTOMER]})
+    await instance.start_outbound()
+    await asyncio.wait_for(instance.response_task, 2)
+    opening = instance.native_turn
+    if action == "reconnect":
+        await instance.close_native()
+        await instance.handle_native_event({"type": "conversation.item.input_audio_transcription.completed",
+                                           "item_id": "closed-input", "text": "是的"})
+        assert instance.insurance_authorization.version == 0
+        await instance.enable_native()
+    else:
+        await instance.interrupt()
+    assert opening.canceled
+    instance._update_playback(opening.turn_id, True)
+    cancellations = state.cancels
+    socket.drain()
+
+    await utterance(instance, item="late-identity-reply", text="是的")
+
+    assert instance.native_turn is opening and opening.canceled
+    assert instance.insurance_authorization.version == 0
+    events = socket.drain()
+    assert any(isinstance(event, dict) and event.get("type") == "barge_in_rejected"
+               and event.get("reason") == "backchannel" for event in events)
+    assert not any(isinstance(event, dict) and event.get("type") == "transcript" for event in events)
+    assert state.cancels == cancellations
+
+
+async def test_opening_exception_expires_after_first_input_and_keeps_late_items_retired(native, monkeypatch):
+    socket, instance, _, state = native
+    business_catalog(monkeypatch, {"客户": [CUSTOMER]})
+    await instance.start_outbound()
+    await asyncio.wait_for(instance.response_task, 2)
+    instance._update_playback(instance.native_turn.turn_id, True)
+    identity_reply = await utterance(instance, item="identity-reply", text="是的")
+    # Ordinary subsequent output uses the existing backchannel rule; this
+    # fixture does not attempt to judge the provider's identity semantics.
+    await output(instance, item="identity-reply", text="后续普通陈述。")
+    await audio_start(instance, item="identity-reply")
+    instance._update_playback(identity_reply.turn_id, True)
+    socket.drain()
+    await utterance(instance, item="ordinary-ack", text="嗯")
+    assert instance.native_turn is identity_reply
+    assert instance.turns["ordinary-ack"].canceled
+    assert instance.insurance_authorization.version == 1
+    events = socket.drain()
+    assert any(isinstance(event, dict) and event.get("type") == "barge_in_rejected"
+               and event.get("reason") == "backchannel" for event in events)
+    assert not any(isinstance(event, dict) and event.get("type") == "transcript" for event in events)
+
+    newer = await utterance(instance, item="next-question", text="请先介绍一下服务。")
+    socket.drain()
+    await instance.handle_native_event({"type": "conversation.item.input_audio_transcription.completed",
+                                       "item_id": "identity-reply", "text": "是的"})
+    await output(instance, item="identity-reply", response="late-output", text="迟到内容。")
+    assert instance.native_turn is newer and newer.question == "请先介绍一下服务。"
+    assert instance.insurance_authorization.version == 2
+    assert socket.drain() == []
+    assert state.cancels == 0
+
+
+@pytest.mark.parametrize("exchanges", [
+    [],
+    [("是我", "您好，我是保险公司的车险服务专员，想跟您聊一下车险续保的事，现在方便吗？")],
+    [("是我", "您好，我是保险公司的车险服务专员，想跟您聊一下车险续保的事，现在方便吗？"),
+     ("现在方便", "您这次续保有什么保障调整需求？")],
+    [("不是本人", "抱歉打扰了，再见。")],
+])
+@pytest.mark.parametrize("reconnect", [False, True])
+async def test_reopening_native_preserves_recorded_sales_progress_without_permanent_initial_stage(native, monkeypatch, exchanges, reconnect):
+    """Recorded histories exercise reconstruction; no fake semantic response is generated."""
+    _, instance, _, state = native
+    calls = business_catalog(monkeypatch, {"客户": [CUSTOMER]})
+    await instance.start_outbound()
+    await asyncio.wait_for(instance.response_task, 2)
+    instance.public_history.extend(exchanges)
+    expected_history = [(outbound.OUTBOUND_CONTEXT, GREETING), *exchanges]
+    assert instance.public_history == expected_history
+
+    if reconnect:
+        await instance.close_native()
+    else:
+        await instance.disable_native()
+    await instance.enable_native()
+    await instance.start_outbound()
+
+    if reconnect:
+        assert state.initial_history[-1] == expected_history
+        assert '"sales_stage": "awaiting_identity_reply"' not in state.instructions
+        assert "实际对话和公开历史为准，不重复已完成的身份确认、自我介绍或方便确认" in state.instructions
+    else:
+        assert state.opened == 1
+        assert "这是首句时的初始状态，不是永久阶段" in state.hints[-1]
+        assert instance.public_history == expected_history
+    assert state.speech == [GREETING]
+    assert instance.insurance_authorization.selected_customer == CUSTOMER
+    assert [name for name, _ in calls] == ["get_expiring_customers"]
 
 
 @pytest.mark.parametrize("result", [
@@ -137,7 +354,7 @@ async def test_dial_starts_assistant_only_sales_opening_without_customer_consent
     assert instance.native_turn.finished and instance.native_turn.answer == GREETING
     assert state.sequence[:3] == ["instructions", "history", "speech"]
     assert len(state.hints) == 1 and CUSTOMER["姓名"] in state.hints[0]
-    assert "客户若回答方便" in state.hints[0]
+    assert "客户确认本人后才说" in state.hints[0]
     assert state.history == [(outbound.OUTBOUND_CONTEXT, GREETING)]
     assert instance.native_turn.native_history_seeded
 

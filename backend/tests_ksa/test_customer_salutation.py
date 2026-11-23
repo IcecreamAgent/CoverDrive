@@ -51,8 +51,7 @@ async def test_real_opening_speaks_selected_full_name_and_preserves_later_saluta
     calls = business_catalog(monkeypatch, {'客户': [customer]})
     greeting, fact = await outbound.prepare_outbound_customer()
     name = identity['姓名'].strip()
-    assert greeting == (f'{name}，您好，我是保险公司的车险服务专员。'
-                        '想和您确认一下车险续保安排，现在方便聊两句吗？')
+    assert greeting == f'您好，请问是{name}吗？'
     assert greeting.count(name) == 1
     assert '先生' not in greeting and '女士' not in greeting
     assert fact['customer_salutation'] == salutation
@@ -72,8 +71,7 @@ async def test_native_named_opening_subtitles_history_and_later_deep_task_share_
     calls = business_catalog(monkeypatch, {'客户': [customer]})
     await instance.start_outbound()
     await asyncio.wait_for(instance.response_task, 2)
-    greeting = (f'{identity["姓名"]}，您好，我是保险公司的车险服务专员。'
-                '想和您确认一下车险续保安排，现在方便聊两句吗？')
+    greeting = f'您好，请问是{identity["姓名"]}吗？'
     assert state.speech == [greeting]
     events = socket.drain()
     assert [event['text'] for event in events if isinstance(event, dict)
@@ -84,7 +82,8 @@ async def test_native_named_opening_subtitles_history_and_later_deep_task_share_
     assert f'"customer_name": "{identity["姓名"]}"' in state.hints[0]
     assert f'"customer_salutation": "{salutation}"' in state.hints[0]
     assert f'"spoken_opening": "{greeting}"' in state.hints[0]
-    assert '开场之后需要称呼客户时只用customer_salutation' in state.hints[0]
+    assert '"sales_stage": "awaiting_identity_reply"' in state.hints[0]
+    assert '确认身份后需要称呼客户时只用customer_salutation' in state.hints[0]
     assert instance.insurance_authorization.selected_customer == customer
     monkeypatch.setattr(agent, 'ChatOpenAI', lambda **kwargs: object())
     inputs = []
@@ -99,6 +98,6 @@ async def test_native_named_opening_subtitles_history_and_later_deep_task_share_
     facts = next(m.content for m in inputs[0]['messages'] if isinstance(m, SystemMessage))
     assert f'"customer_salutation": "{salutation}"' in facts
     assert identity['姓名'] in facts  # Tools retain the full verified identity.
-    assert '服务端主动开场先喊出工具已验证的客户完整姓名' in agent.SYSTEM_PROMPT
-    assert '开场之后称呼客户' in agent.SYSTEM_PROMPT
+    assert '服务端首句只问' in agent.SYSTEM_PROMPT
+    assert '确认身份后称呼客户' in agent.SYSTEM_PROMPT
     assert [name for name, _ in calls] == ['get_expiring_customers']
