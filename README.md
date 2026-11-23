@@ -8,6 +8,8 @@
 
 AI 电话客服 Agent 的一段车险续保演示：实时对话、插话打断、查保单、调整方案、计算报价和后台核验。
 
+https://github.com/user-attachments/assets/ca541197-b3ef-4ce0-a747-68b1470182df
+
 [在 B 站观看](https://www.bilibili.com/video/BV1cKyYzWE5C/)
 
 ## 在线体验
