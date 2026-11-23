@@ -63,8 +63,8 @@ async def test_opening_uses_one_real_selected_customer_and_only_the_readonly_too
     assert calls == [("get_expiring_customers", {
         "days": 30, "only_uncontacted": True, "random_pick": False, "limit": 1,
     })]
-    assert CUSTOMER["姓名"] not in greeting
-    assert greeting.startswith("您好，")
+    assert greeting.startswith(f'{CUSTOMER["姓名"]}，您好，')
+    assert greeting.count(CUSTOMER["姓名"]) == 1
     assert facts["customer_salutation"] == "您"
     assert "车险" in greeting and "续保" in greeting
     assert OTHER_CUSTOMER["姓名"] not in greeting
